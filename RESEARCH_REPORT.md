@@ -1,58 +1,92 @@
-# Research Report: cmux Architecture and Implementation
+# cmux: Technical Research & Architecture Report
 
-## Introduction
-cmux is a native macOS terminal application built on top of the Ghostty terminal engine. It extends the core terminal functionality with features specifically designed for AI coding agents, such as vertical tabs, integrated notifications, and a scriptable embedded browser.
+This report documents the architecture of `cmux`, its implementation of core features, and a guide for replicating this functionality on Linux using `libghostty`.
 
-## Parallel with Ghostty
-Ghostty provides a high-performance terminal emulator engine (`libghostty`) with a C API.
-- **Ghostty macOS**: Written in Zig (mostly), uses AppKit/Metal for rendering.
-- **Ghostty Linux**: Written in Zig, uses GTK4 for rendering.
-- **cmux**: A consumer of `libghostty`. It is written in Swift and uses AppKit and SwiftUI for the UI. It links against the same `libghostty` C API that the original Ghostty apps use.
+## 1. High-Level Architecture
+`cmux` is a native macOS terminal application that embeds `libghostty` (the Ghostty terminal engine). It follows the "embedder" pattern:
+- **Engine**: `libghostty` (Zig) handles terminal emulation, PTY I/O, and OpenGL rendering.
+- **Host**: `cmux` (Swift/AppKit/SwiftUI) handles windowing, UI components (sidebar), and high-level features (CLI, agent hooks).
+- **Communication**: The host communicates with the engine via a C API (`ghostty.h`). A Unix domain socket server allows external agents and the `cmux` CLI to interact with the host.
 
-## Historical Timeline
-- **Late Jan 2025**: Project started as a fork/extension of Ghostty, focusing on native macOS implementation with Swift.
-- **Early Feb 2025**: Core terminal functionality with tab management and basic socket API.
-- **Mid Feb 2025**: Addition of NSPopover-based notifications, sidebar metadata (git branch, ports), and a scriptable browser.
-- **Late Feb 2025**: Transitioned to AGPL-3.0 license. Introduction of v2 JSON-RPC style socket API for more robust automation.
-- **March 2025**: Advanced features like keyboard copy mode, markdown viewer, and multi-window support.
+## 2. Core Feature Implementation
 
-## Key Features Implementation
+### 2.1 The Sidebar (Vertical Tabs & Metadata)
+The sidebar is implemented in SwiftUI (`VerticalTabsSidebar`) and provides a timeline-focused view of the workspace.
+- **Data Model**: Managed by `Workspace.swift`. It tracks a list of `Panel` objects, each representing a terminal surface.
+- **Metadata Reporting**:
+  - Ghostty surfaces report metadata (Current Working Directory, Git branch, active ports) via OSC sequences or the socket API.
+  - The `TerminalController` listens for these updates and refreshes the `Workspace` state.
+  - The UI uses Combine bindings to update the sidebar in real-time.
 
-### 1. Sidebar Architecture
-The sidebar is implemented using SwiftUI (`VerticalTabsSidebar.swift` inside `ContentView.swift`).
-- **Dynamic Binding**: It binds directly to the `Workspace` object, which acts as a state container for a group of terminal/browser panels.
-- **Metadata Reporting**: Shell integration scripts and agents report metadata (git branch, current directory, PR status, listening ports) via the socket API. This metadata is stored in the `Workspace` and automatically reflected in the sidebar.
-- **Performance**: Uses `Equatable` view protocols and `ObservedObject` to minimize SwiftUI re-renders during high-frequency terminal updates.
-- **Drag-and-Drop**: Implements custom `DropDelegate` for workspace reordering and cross-window tab moves.
+### 2.2 Notification System
+`cmux` captures notifications from two sources:
+1. **OSC Sequences**: Capture `OSC 9`, `OSC 99`, and `OSC 777` (standard terminal notification codes).
+2. **Socket API**: The `cmux notify` command sends a message to the Unix socket, which the host app then displays using `NSUserNotificationCenter`.
+- **Storage**: All notifications are kept in `TerminalNotificationStore.swift`, allowing for a "notification history" view.
 
-### 2. Notification System
-Notifications flow through a centralized `TerminalNotificationStore`.
-- **Sources**:
-    - **Terminal Sequences**: OSC 9, 99, and 777 sequences are captured by the Ghostty engine and delivered to the app via the `GHOSTTY_ACTION_DESKTOP_NOTIFICATION` callback.
-    - **CLI/Socket**: The `cmux notify` command allows external processes (like agents) to trigger notifications.
-    - **Internal Events**: App-level events (like build completion signals).
-- **Processing**: `TerminalNotificationStore` manages unread counts, persistence, and triggers macOS system notifications via `UNUserNotificationCenter`.
-- **UI Integration**: Tab items in the sidebar and panes in the workspace show visual indicators (blue dots, rings) when unread notifications are present.
+### 2.3 CLI & Agent Hookability
+This is the core strength of `cmux`, positioning it as a "Terminal for Agents."
+- **Unix Domain Socket**: Located at `/tmp/cmux.socket`.
+- **Protocols**:
+  - **v1 (Plain Text)**: Legacy protocol for simple commands.
+  - **v2 (JSON-RPC)**: Modern handle-based API (introduced Feb 2026). It supports granular control over windows, workspaces, and panels.
+- **Agent Skills**: The repository includes a `skills/` directory providing specialized prompts and guidance for LLM agents to use `cmux` effectively.
+- **Browser Automation**: `cmux` integrates an embedded `WKWebView` with agent-first capabilities:
+  - **Accessibility Tree Snapshots**: Extracts a structured representation of the web page for LLM processing.
+  - **Action Verification**: Commands like `browser fill` support optional post-action snapshots to verify results.
+  - **Session Management**: Cookie and proxy sync across separate automation data stores.
 
-### 3. CLI and Agent Hookability
-The CLI (`cmux`) is a thin wrapper that communicates with the app over a Unix domain socket.
-- **Dual Protocols**:
-    - **v1**: Simple line-based plain text protocol for quick commands.
-    - **v2**: JSON-RPC style protocol for complex interactions and rich data exchange.
-- **Automation Primitives**:
-    - **Terminal Control**: Directly injecting input events into the Ghostty engine.
-    - **Screen Reading**: Capturing terminal scrollback and current screen state.
-    - **Browser Automation**: A powerful `browser.*` API that uses injected JavaScript to extract an accessibility-tree-like snapshot of the page and perform interactions (click, type, etc.) on `WKWebView`.
-- **Metadata reporting**: Primitives like `set-status`, `report-git-branch`, and `log` allow agents to "own" parts of the UI to provide status updates.
+## 3. History & Timeline
+- **Jan 2025**: Project founded as a native macOS Ghostty embedder with vertical tabs.
+- **Feb 2026**: Major evolution into an agent-focused platform.
+  - Introduced **v2 JSON-RPC API** for robust automation.
+  - Integrated **WKWebView** with specialized browser automation commands.
+  - Relicensed to **AGPL-3.0**.
+- **Active Development**: Ongoing focus on multi-window automation, specialized agent "skills," and refining the "timeline" sidebar UX.
 
-## Path to Linux Implementation
-To recreate cmux on Linux, one would follow a similar architecture but with different technologies:
-1. **Language**: Zig or C/C++ to easily interface with `libghostty` and GTK.
-2. **UI Framework**: GTK4 is the natural choice, matching Ghostty's own Linux implementation.
-3. **Sidebar**: Use `GtkListView` or `GtkListBox` bound to a data model representing the workspaces.
-4. **Notifications**: Use `libnotify` for system-level notifications and internal GTK widgets for in-app indicators.
-5. **CLI/Socket**: Implement a similar Unix socket listener. GLib provides excellent support for Unix sockets and JSON parsing (`json-glib`).
-6. **Browser**: Use `WebKitGTK` (`WebKitWebView`). It provides similar capabilities to `WKWebView` on macOS, including JavaScript injection and interaction.
+## 4. Recreating cmux on Linux (libghostty + GTK4)
 
-## Conclusion
-cmux demonstrates that `libghostty` is a powerful, embeddable engine. By treating the terminal as a component rather than an entire application, developers can build rich, specialized environments tailored for modern workflows like AI-assisted coding.
+### 4.1 Prerequisites & Technical Limitations
+To build a `cmux`-like app on Linux, you must link against `libghostty`.
+*Important Note*: As of the current version, the `embedded` runtime (which powers the library build of Ghostty) is primarily implemented for Darwin (macOS/iOS).
+- In `ghostty/src/apprt/embedded.zig`, the `Platform` union currently only contains `macos` and `ios` variants.
+- In `ghostty/include/ghostty.h`, `ghostty_platform_u` reflects this limitation.
+
+To replicate `cmux` on Linux, you will need to:
+1. **Extend libghostty**: Modify `src/apprt/embedded.zig` to add a Linux-compatible platform tag (e.g., `GHOSTTY_PLATFORM_GTK4`) and include a field for the native window handle (like a `GtkWidget*` or `GdkSurface*`).
+2. **Bridge the Renderer**: Ensure the OpenGL renderer in Ghostty can bind to the provided GTK4 surface when running in embedded mode.
+
+### 4.2 Initialization Sequence (C API)
+1. **Init**: Call `ghostty_init(argc, argv)` to bootstrap the Zig runtime.
+2. **Configuration**:
+   ```c
+   ghostty_config_t config = ghostty_config_new();
+   ghostty_config_load_default_files(config);
+   ghostty_config_finalize(config);
+   ```
+3. **App Creation**: Initialize the `ghostty_app_t` with runtime callbacks.
+   ```c
+   ghostty_runtime_config_s rt_config = {
+       .userdata = my_app_state,
+       .wakeup_cb = my_wakeup_handler, // Vital: calls ghostty_app_tick
+       .action_cb = my_action_handler, // Handles new windows/tabs/etc.
+       .write_clipboard_cb = my_clipboard_writer,
+       .read_clipboard_cb = my_clipboard_reader
+   };
+   ghostty_app_t app = ghostty_app_new(&rt_config, config);
+   ```
+4. **Surface Creation**:
+   - On Linux/GTK4, you'll need to pass the widget handle.
+   - You must call `ghostty_surface_set_size` and `ghostty_surface_set_content_scale` once the GTK widget is realized.
+
+### 4.3 Implementing cmux Features on Linux
+- **Sidebar**: Use GTK4's `GtkListView` or `AdwViewStack` for the sidebar. Use `libadwaita` for a modern "native" look similar to the macOS version.
+- **Socket Server**: Implement a `GDBus` or raw Unix socket listener in your main event loop. This listener will modify your app state and call `ghostty_surface_process_output` or `ghostty_surface_binding_action`.
+- **Metadata Capturing**: Intercept terminal actions in your `action_cb`. When Ghostty reports a PWD change or a notification, update your UI.
+
+## 5. Summary for "From Scratch" Implementation
+To start, don't try to build the whole app.
+1. Build a minimal C/GTK4 app that initializes `libghostty`.
+2. Get the "wakeup/tick" loop working (this is the heartbeat of the terminal).
+3. Implement the Unix socket server; this is the key to "agent focus."
+4. Finally, add the UI overlays (Sidebar) that bind to the data collected via the socket.
